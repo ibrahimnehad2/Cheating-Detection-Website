@@ -1,98 +1,64 @@
-import React,{useState} from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 const Login = (props) => {
+  const [credentials, setCredentials] = useState({ stud_id: '', password: '' });
+  const navigate = useNavigate();
 
-    const [credentials, setCredentials] = useState({
-        stud_id: "", password: ""
-    });
+  const onChange = (e) => {
+    setCredentials({ ...credentials, [e.target.name]: e.target.value });
+  };
 
-    let history = useNavigate();
-
-    const handlesubmit = async (e) => {
-        e.preventDefault();
-    
-        const { stud_id, password } = credentials;
-    
-        if (!stud_id || !password) {
-            console.error("ID or password is missing");
-            return;
-        }
-    
-        try {
-            const response = await fetch(`http://127.0.0.1:15000/auth/login`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ stud_id, password }),
-            });
-    
-            if (!response.ok) {
-                console.error(`HTTP error! Status: ${response.status}`);
-                const errorResponse = await response.json();
-                console.error('Error response:', errorResponse);
-                return;
-            }
-    
-            const json = await response.json();
-    
-            console.log('Login Response:', json);
-    
-            if (json.msg.success) {
-                window.localStorage.setItem('token', json.msg.authToken);
-                props.setLoggedInUser(stud_id); 
-                history('/');
-            } else {
-                console.log("Login failed:", json.msg || "Unknown error");
-            }
-        } catch (error) {
-            console.error("Error during login:", error);
-        }
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    const { stud_id, password } = credentials;
+    try {
+      const response = await fetch("http://localhost:15000/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stud_id, password })
+      });
+      const json = await response.json();
+      if (response.ok && json.msg?.success) {
+        localStorage.setItem('token', json.msg.authToken);
+        props.setLoggedInUser(stud_id);
+        navigate('/student-dashboard');
+      }
+    } catch (error) {
+      console.error("Login error:", error);
     }
-    
+  };
 
-    const onChange = (e) => {
-        setCredentials({ ...credentials, [e.target.name]: e.target.value })
-    }
+  return (
+    <div className="auth-container">
+      <h2 className="auth-title">Student Login</h2>
+      <form onSubmit={handleSubmit}>
+        <label className="form-label">Student ID</label>
+        <input
+          type="number"
+          name="stud_id"
+          className="form-control"
+          value={credentials.stud_id}
+          onChange={onChange}
+          required
+        />
 
-    return (
-        <>
-            <form onSubmit={handlesubmit}>
-                <section className="fire my-4">
-                    <div className="h-50">
-                        <div className="row justify-content-sm-center h-100">
-                            <div className="col-xxl-4 col-xl-5 col-lg-5 col-md-7 col-sm-9">
-                                <div className="card shadow-lg">
-                                    <div className="card-body p-5">
-                                        <h1 className="fs-2 card-title text-center fw-bold mb-4">Login</h1>
-                                        <div className="mb-3">
-                                            <label className="mb-2 text-muted" htmlFor="email">student ID</label>
-                                            <input id="id" onChange={onChange} value={credentials.stud_id} type="number" className="form-control" name="stud_id" autoComplete="off" required />
-                                        </div>
+        <label className="form-label">Password</label>
+        <input
+          type="password"
+          name="password"
+          className="form-control"
+          value={credentials.password}
+          onChange={onChange}
+          required
+        />
 
-                                        <div className="mb-3">
-                                            <div className="mb-2 w-100">
-                                                <label className="text-muted" htmlFor="password">Password</label>
-                                            </div>
-                                            <input id="password" onChange={onChange} value={credentials.password} type="password" className="form-control" name="password" required />
-                                        </div>
+        <button type="submit" className="btn btn-primary">
+          Login as Student
+        </button>
+      </form>
+    </div>
+  );
+};
 
-                                        <div className="d-flex align-items-center">
-                                            <button type="submit" className="btn btn-primary ">
-                                                Login
-                                            </button>
-                                        </div>
-                                        <Link className="d-flex justify-content-end" aria-current="page" to="#">Forgot Password?</Link>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-            </form>
-        </>
-    )
-}
-
-export default Login
+export default Login;

@@ -1,35 +1,43 @@
 import React, { useEffect, useState, useRef } from 'react';
 import Webcam from "react-webcam";
+import * as cocoSsd from '@tensorflow-models/coco-ssd';
+import '@tensorflow/tfjs';
+
 import { detectCheating, extractFaceCoordinates, getCheatingStatus } from "../helpers/face-detection-helper";
-import { NO_CHEATING_RESULT } from "../helpers/face-detection-constants";
 import { FaceDetection } from "@mediapipe/face_detection";
 import { Camera } from "@mediapipe/camera_utils";
+import { useLocation } from 'react-router-dom';
 
 const Exam = (props) => {
   const [examStarted, setExamStarted] = useState(false);
   const [submitted, setSubmitted] = useState(false);
-  const [timeRemaining, setTimeRemaining] = useState(300); // 5 minutes = 300 seconds
+  const [timeRemaining, setTimeRemaining] = useState(300);
   const [isRunning, setIsRunning] = useState(false);
   const [showWarning, setShowWarning] = useState(false);
   const [warningMessage, setWarningMessage] = useState('');
   const [exam, setExam] = useState([]);
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
   const [cheatingAlert, setCheatingAlert] = useState('');
-  const [studentScore, setStudentScore] = useState(0);  // New state for the student's score
+  const [studentScore, setStudentScore] = useState(0);
+
+  const [model, setModel] = useState(null);
 
   const webcamRef = useRef(null);
   const faceDetectionRef = useRef(null);
-  const cheatingTimers = useRef({ left: 0, right: 0 }); // Timers for left and right looks
-  const cumulativeTimers = useRef({ left: 0, right: 0 }); // Cumulative timers for left and right looks
+  const canvasRef = useRef(null);
 
-  // for decoding " "
-  const decodeHTMLEntities = (text) => {
-    const parser = new DOMParser();
-    const decodedString = parser.parseFromString(`<!doctype html><body>${text}`, 'text/html').body.textContent;
-    return decodedString;
-  };
+  const noFaceFrames = useRef(0);
+  const multiFaceFrames = useRef(0);
+  const FRAMES_THRESHOLD = 300; 
+  const cheatingTimers = useRef({ left: 0, right: 0 });
+  const cumulativeTimers = useRef({ left: 0, right: 0 });
 
-  // Shuffle an array (Fisher-Yates Shuffle algorithm)
+  const location = useLocation();
+  const queryParams = new URLSearchParams(location.search);
+  const teacherId = queryParams.get("teacherId");
+  const courseName = queryParams.get("courseName");
+  const examTitleParam = queryParams.get("examTitle") || "";
+
   const shuffleArray = (array) => {
     let currentIndex = array.length, randomIndex;
     while (currentIndex !== 0) {
@@ -40,67 +48,107 @@ const Exam = (props) => {
     return array;
   };
 
+  // Load COCO-SSD
+  useEffect(() => {
+    const loadModel = async () => {
+      try {
+        const loadedModel = await cocoSsd.load();
+        setModel(loadedModel);
+      } catch (error) {
+        console.error("Error loading COCO-SSD model:", error);
+      }
+    };
+    loadModel();
+  }, []);
+
   const handleStart = () => {
+    if (!teacherId || !courseName || !examTitleParam) {
+      return;
+    }
     setExamStarted(true);
     setSubmitted(false);
     setIsRunning(true);
 
-    fetch('https://opentdb.com/api.php?amount=5&category=18')
-      .then(response => response.json())
+    fetch(`http://localhost:15000/exams/by-course?teacherId=${teacherId}&courseName=${encodeURIComponent(courseName)}`)
+      .then(resp => resp.json())
       .then(data => {
-        const formattedExam = data.results.map(question => {
-          const allAnswers = [question.correct_answer, ...question.incorrect_answers];
+        if (!data.exams || data.exams.length === 0) {
+          setExamStarted(false);
+          return;
+        }
+
+        const selectedExam = data.exams.find(
+          exam => exam.title.trim().toLowerCase() === examTitleParam.trim().toLowerCase()
+        );
+        if (!selectedExam) {
+          setExamStarted(false);
+          return;
+        }
+
+        const formattedExam = selectedExam.questions.map(q => {
+          const allAnswers = shuffleArray(q.options);
           return {
-            ...question,
-            question: decodeHTMLEntities(question.question), // Decode HTML entities in the question
-            allAnswers: shuffleArray(allAnswers),
-            score: 0  // Initialize score for each question
+            question: q.questionText,
+            allAnswers,
+            correct_answer: q.answer,
+            score: 0
           };
         });
         setExam(formattedExam);
+
+        if (selectedExam.timeLimit && typeof selectedExam.timeLimit === 'number') {
+          setTimeRemaining(selectedExam.timeLimit * 60);
+        } else {
+          setTimeRemaining(300);
+        }
       })
-      .catch(error => console.error('Error:', error));
+      .catch(err => console.error("Error fetching exam:", err));
   };
 
   const handleAnswerSelection = (index) => {
     if (exam[currentQuestionIndex].allAnswers[index] === exam[currentQuestionIndex].correct_answer) {
-      // If correct, increase the score for the current question
       setExam(prevExam => {
         const newExam = [...prevExam];
-        newExam[currentQuestionIndex].score = 1;  // Increment by 1 for correct answer
+        newExam[currentQuestionIndex].score = 1;
+        return newExam;
+      });
+    } else {
+      setExam(prevExam => {
+        const newExam = [...prevExam];
+        newExam[currentQuestionIndex].score = 0;
         return newExam;
       });
     }
   };
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (isCheater = false) => {
     setSubmitted(true);
     setExamStarted(false);
     setIsRunning(false);
-  
+
     const totalScore = exam.reduce((sum, question) => sum + question.score, 0);
     setStudentScore(totalScore);
-  
+
     const payload = {
-      studentId: props.loggedInUser, // Pass the logged-in student's ID
-      examId: 'exam123', // Replace with dynamic exam ID
-      score: totalScore,
-      status: 'completed',
+      studentId: props.loggedInUser,
+      teacherId,
+      courseName,
+      examTitle: examTitleParam || "UntitledExam",
+      score: isCheater ? 0 : totalScore,
+      status: isCheater ? "cheating-detected" : "completed"
     };
-  
+
     try {
-      await fetch('/api/exams/submit', {
+      await fetch('http://localhost:15000/exams/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       });
-      alert('Exam submitted successfully!');
+      // No popup
     } catch (error) {
       console.error('Error submitting exam:', error);
     }
   };
-  
-  
 
   const handleNext = () => {
     if (currentQuestionIndex < exam.length - 1) {
@@ -108,72 +156,47 @@ const Exam = (props) => {
     }
   };
 
-  // Effect to handle the countdown timer
+  // Timer
   useEffect(() => {
     let timer;
     if (isRunning && timeRemaining > 0) {
       timer = setInterval(() => {
-        setTimeRemaining(prevTime => prevTime - 1);
+        setTimeRemaining(prev => prev - 1);
       }, 1000);
-    } else if (timeRemaining === 0) {
+    } else if (timeRemaining === 0 && isRunning) {
       setIsRunning(false);
       setSubmitted(true);
+      handleSubmit(false);
     }
-
     return () => clearInterval(timer);
   }, [isRunning, timeRemaining]);
 
-  // Format time in MM:SS
   const formatTime = (seconds) => {
     const minutes = Math.floor(seconds / 60);
     const secs = seconds % 60;
     return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
   };
 
-  // Handle visibility change event
-  const handleVisibilityChange = () => {
-    if (document.hidden) {
-      // Tab is not visible
-      showWarningMessage('Tab is not visible');
-    }
-  };
-
-  // Handle window blur event
-  const handleBlur = () => {
-    showWarningMessage('Window lost focus');
-  };
-
-  // Handle window focus event
-  const handleFocus = () => {
-    setShowWarning(false);
-  };
-
-  // Handle window resize event
-  const handleResize = () => {
-    if (window.innerWidth < 800) { // Example condition: when window width is less than 800px
-      showWarningMessage('Window resized to small size');
-    }
-  };
-
-  // Show warning message for a specified duration
+  // Visibility / focus warnings
   const showWarningMessage = (message) => {
     setWarningMessage(message);
     setShowWarning(true);
-
-    // Hide warning after 3 seconds
-    setTimeout(() => {
-      setShowWarning(false);
-    }, 3000);
+    setTimeout(() => setShowWarning(false), 3000);
+  };
+  const handleVisibilityChange = () => {
+    if (document.hidden) showWarningMessage('Tab not visible');
+  };
+  const handleBlur = () => showWarningMessage('Window lost focus');
+  const handleFocus = () => setShowWarning(false);
+  const handleResize = () => {
+    if (window.innerWidth < 800) showWarningMessage('Window resized to small size');
   };
 
   useEffect(() => {
-    // Attach event listeners
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleBlur);
     window.addEventListener('focus', handleFocus);
     window.addEventListener('resize', handleResize);
-
-    // Clean up event listeners on component unmount
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleBlur);
@@ -182,84 +205,68 @@ const Exam = (props) => {
     };
   }, []);
 
-  // Face detection
+  // Mediapipe FaceDetection
   useEffect(() => {
-    let cheatingCount = 0; // Counter to track instances of looking left or right
-
+    let cheatingCount = 0;
     const faceDetection = new FaceDetection({
       locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`,
     });
-
     faceDetection.setOptions({
       minDetectionConfidence: 0.5,
       model: "short",
     });
 
     async function onResult(result) {
+      if (!examStarted || submitted) return;
+
       if (result.detections.length < 1) {
-        setCheatingAlert("Face not detected. Ensure your face is visible!");
+        setCheatingAlert("Face not detected!");
+        noFaceFrames.current += 1;
+        if (noFaceFrames.current >= FRAMES_THRESHOLD) {
+          handleSubmit(true);
+        }
         return;
       } else if (result.detections.length > 1) {
-        setCheatingAlert("Multiple faces detected. Possible cheating!");
+        setCheatingAlert("Multiple faces detected!");
+        multiFaceFrames.current += 1;
+        if (multiFaceFrames.current >= FRAMES_THRESHOLD) {
+          handleSubmit(true);
+        }
         return;
+      } else {
+        setCheatingAlert("");
       }
 
       const faceCoordinates = extractFaceCoordinates(result);
       const [lookingLeft, lookingRight] = detectCheating(faceCoordinates);
       const cheatingStatus = getCheatingStatus(lookingLeft, lookingRight);
-
       setCheatingAlert(cheatingStatus);
 
-      // Increment cheating count if looking left or right is detected
       if (lookingLeft || lookingRight) {
         const direction = lookingLeft ? 'left' : 'right';
         cheatingTimers.current[direction] += 1;
         cumulativeTimers.current[direction] += 1;
 
         if (cheatingTimers.current[direction] > 30) {
-          setCheatingAlert(`Looking ${direction} for over 5 seconds!`);
+          setCheatingAlert(`Looking ${direction} for over 1 second!`);
           cheatingCount += 1;
-          cheatingTimers.current[direction] = 0; // Reset timer
+          cheatingTimers.current[direction] = 0;
         }
 
-        if (cumulativeTimers.current[direction] >= 1000000000000000000000) {
+        if (cumulativeTimers.current[direction] >= 1000) {
           setCheatingAlert("Cheating detected");
-          setIsRunning(false); // Stop the timer
-          setSubmitted(true); // Mark the exam as submitted
-          setExamStarted(false); // End the exam
+          handleSubmit(true);
         }
       } else {
         cheatingTimers.current.left = 0;
         cheatingTimers.current.right = 0;
       }
 
-      // Automatically submit and close the exam if cheatingCount exceeds 3
       if (cheatingCount > 3) {
-        setCheatingAlert("Cheating detected! Exam is now closed.");
-        setIsRunning(false);
-        setSubmitted(true);
-        setExamStarted(false);
-      
-        const payload = {
-          studentId: props.loggedInUser,
-          examId: 'exam123',
-          score: 0, // Set score to 0 if cheating is detected
-          status: 'cheating-detected',
-        };
-      
-        try {
-          await fetch('/api/exams/submit', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload),
-          });
-          alert('Cheating detected! Your exam is closed.');
-        } catch (error) {
-          console.error('Error updating cheating status:', error);
-        }
+        setCheatingAlert("Cheating detected! Exam closed.");
+        handleSubmit(true);
       }
-    }  
-        
+    }
 
     faceDetection.onResults(onResult);
     faceDetectionRef.current = faceDetection;
@@ -267,106 +274,208 @@ const Exam = (props) => {
     if (webcamRef.current) {
       const camera = new Camera(webcamRef.current.video, {
         onFrame: async () => {
-          if (examStarted) {
+          if (examStarted && !submitted) {
             await faceDetection.send({ image: webcamRef.current.video });
           }
         },
       });
-
       camera.start();
     }
 
     return () => {
       faceDetection.close();
     };
-  }, [examStarted]);
+  }, [examStarted, submitted, props.loggedInUser]);
+
+  // COCO-SSD phone detection
+  useEffect(() => {
+    if (!model) return;
+
+    let animationFrameId;
+
+    const detectMobile = async () => {
+      if (
+        webcamRef.current &&
+        webcamRef.current.video.readyState === 4 &&
+        examStarted &&
+        !submitted
+      ) {
+        const video = webcamRef.current.video;
+        if (canvasRef.current) {
+          canvasRef.current.width = video.videoWidth;
+          canvasRef.current.height = video.videoHeight;
+        }
+
+        const predictions = await model.detect(video);
+        const ctx = canvasRef.current.getContext("2d");
+        ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
+
+        let mobileDetected = false;
+        const mobileClasses = ['cell phone', 'phone', 'smartphone', 'mobile phone'];
+
+        predictions.forEach(prediction => {
+          const [x, y, width, height] = prediction.bbox;
+          const className = prediction.class.toLowerCase();
+          const confidence = prediction.score;
+
+          if (mobileClasses.includes(className) && confidence > 0.8) {
+            ctx.strokeStyle = "red";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, width, height);
+
+            ctx.font = "16px Arial";
+            ctx.fillStyle = "red";
+            ctx.fillText(
+              `${prediction.class} (${(confidence * 100).toFixed(1)}%)`,
+              x,
+              y > 20 ? y - 5 : y + 15
+            );
+
+            mobileDetected = true;
+          }
+        });
+
+        if (mobileDetected) {
+          setCheatingAlert("Mobile phone detected! You are a cheater!");
+          handleSubmit(true);
+          return;
+        }
+      }
+      animationFrameId = requestAnimationFrame(detectMobile);
+    };
+
+    detectMobile();
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [model, examStarted, submitted]);
 
   return (
     <>
-      <div>
-        {showWarning && (
-          <div className="alert alert-danger" role="alert">
-            <a href="#" className="alert-link">Warning!</a> {warningMessage}
-          </div>
-        )}
-      </div>
+      {showWarning && (
+        <div className="alert alert-danger" role="alert">
+          {warningMessage}
+        </div>
+      )}
 
-      <p className='mx-3 fw-bold'>Student ID: {props.loggedInUser || 'Unknown'}</p>
+      <p style={{ marginLeft: "15px", fontWeight: "bold" }}>
+        Student ID: {props.loggedInUser || 'Unknown'} | Course: {courseName || 'Unknown'}
+      </p>
 
       <div className='container'>
-        <div className='exam_box'>
-          <div className='exam_box_header'>
-            <p className=''>Introduction to Artificial Intelligence (cc511) - Prof Dr Ayman Elshenawy </p>
-            {!examStarted && (
-              <button className='btn btn-warning' onClick={handleStart} disabled={submitted}>
+        <div style={{ margin: "20px 0" }}>
+          <div>
+            {!examStarted && !submitted && (
+              <button 
+                className='btn btn-primary' 
+                onClick={handleStart}
+                disabled={submitted}
+              >
                 Start Exam
               </button>
             )}
             {examStarted && !submitted && (
-              <button className='btn btn-warning' onClick={handleSubmit}>
+              <button 
+                className='btn btn-primary'
+                onClick={() => handleSubmit(false)}
+                style={{ marginLeft: "10px" }}
+              >
                 Submit
               </button>
             )}
           </div>
           <hr />
+        </div>
 
-          <div className='d-flex h-100'>
-            <div className='w-75 p-4'>
-              {!examStarted && !submitted && (
-                <p className='text-dark text-center fw-bold'>Start Your Exam.</p>
-              )}
-              {examStarted && !submitted && exam.length > 0 && (
-                <div>
-                  <p>{exam[currentQuestionIndex]?.question}</p>
-                  <ul className="list-unstyled">
-                    {exam[currentQuestionIndex]?.allAnswers.map((answer, index) => (
-                      <li key={index}>
+        <div style={{ display: "flex", gap: "20px" }}>
+          <div style={{ flex: "1" }}>
+            {!examStarted && !submitted && (
+              <p style={{ textAlign: "center", fontWeight: "bold" }}>
+                Click "Start Exam" to begin.
+              </p>
+            )}
+            {examStarted && !submitted && exam.length > 0 && (
+              <div>
+                <p style={{ fontWeight: "bold" }}>
+                  {exam[currentQuestionIndex]?.question}
+                </p>
+                <ul style={{ listStyle: "none", paddingLeft: 0 }}>
+                  {exam[currentQuestionIndex]?.allAnswers.map((answer, index) => (
+                    <li key={index} style={{ marginBottom: "8px" }}>
+                      <label>
                         <input
-                          className='mx-2'
+                          style={{ marginRight: "5px" }}
                           type='radio'
                           name='answer'
-                          value={answer}
                           onChange={() => handleAnswerSelection(index)}
-                        /> {answer}
-                      </li>
-                    ))}
-                  </ul>
-                  <button className='btn btn-success' onClick={handleNext} disabled={currentQuestionIndex === exam.length - 1}>
-                    Next
-                  </button>
-                </div>
-              )}
+                        />
+                        {answer}
+                      </label>
+                    </li>
+                  ))}
+                </ul>
+                <button
+                  className='btn btn-primary'
+                  onClick={handleNext}
+                  disabled={currentQuestionIndex === exam.length - 1}
+                >
+                  Next
+                </button>
+              </div>
+            )}
+            {submitted && (
+              <div style={{ marginTop: "20px" }}>
+                <p style={{ fontWeight: "bold" }}>
+                  Score: {studentScore}/{exam.length}
+                </p>
+                {cheatingAlert && (
+                  <span style={{ color: "red" }}>{cheatingAlert}</span>
+                )}
+              </div>
+            )}
+          </div>
 
-              {submitted && (
-                <div className="d-flex flex-column">
-                  <p className="fw-bold">Score: {studentScore}/5</p>
-                  <p>{cheatingAlert && <span className="text-danger">{cheatingAlert}</span>}</p>
-                </div>
-              )}
+          <div style={{ width: "300px", flexShrink: 0 }}>
+            <div className='border border-primary rounded p-2 mb-3'>
+              <h5 style={{ textAlign: "center" }}>Exam Timer</h5>
+              <div style={{ display: "flex", justifyContent: "center" }}>
+                <span style={{ fontWeight: "bold", marginRight: "5px" }}>
+                  Time Left:
+                </span>
+                <span style={{ fontWeight: "bold", color: "#28a745" }}>
+                  {formatTime(timeRemaining)}
+                </span>
+              </div>
             </div>
 
-            <div className='w-25 p-4'>
-              <div className='border border-warning rounded p-2'>
-                <div className='d-flex'>
-                  <p className='text-dark text-center mx-auto p-3 fw-bold'>Exam Timer</p>
-                </div>
-                <div className='d-flex'>
-                  <p className='mx-3 fw-bold text-dark'>Remaining Time:</p>
-                  <span className='mx-2 fw-bold text-success'>{formatTime(timeRemaining)}</span>
-                </div>
-              </div>
-              <div className='border border-warning rounded p-2'>
-                <div className='d-flex'>
-                  <p className='text-dark text-center mx-auto p-3 fw-bold'>Cheating Detection</p>
-                </div>
+            <div
+              className='border border-primary rounded p-2'
+              style={{ position: 'relative', height: '300px' }}
+            >
+              <h5 style={{ textAlign: "center" }}>Cheating Detection</h5>
+              <div style={{ position: 'relative', width: '100%', height: '100%' }}>
                 <Webcam
                   ref={webcamRef}
                   width="100%"
                   height="100%"
                   screenshotFormat="image/jpeg"
+                  videoConstraints={{ facingMode: "user" }}
+                  style={{ position: "absolute", top: 0, left: 0 }}
                 />
-                <p className='text-danger'>{cheatingAlert}</p>
+                <canvas
+                  ref={canvasRef}
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    width: "100%",
+                    height: "100%",
+                  }}
+                />
               </div>
+              <p style={{ color: "red", textAlign: "center", marginTop: "5px" }}>
+                {cheatingAlert}
+              </p>
             </div>
           </div>
         </div>

@@ -20,5 +20,4 @@ const recordingSchema = new mongoose.Schema({
 });
 
 const Record = mongoose.model("Record", recordingSchema);
-
 module.exports = Record;
